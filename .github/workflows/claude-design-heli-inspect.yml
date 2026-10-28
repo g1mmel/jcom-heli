@@ -1,0 +1,65 @@
+name: claude-design helicopter source inspection
+on:
+  push:
+    paths:
+      - '.github/workflows/claude-design-heli-inspect.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Inspect immutable source GLBs without changing them
+        shell: python
+        run: |
+          import hashlib, json, pathlib, shutil, struct
+          out = pathlib.Path('heli-inspection')
+          (out/'source').mkdir(parents=True, exist_ok=True)
+          report = {'agent':'claude-design', 'chat_code':'cg45', 'scope':'source inventory only; no articulation or appearance acceptance', 'models':[]}
+          names = ['ch53e-super-stallion.glb','ch53e-sea-stallion.glb','uh1y-venom.glb','uh1y-venom-bell.glb','uh1y-venom-usmc.glb']
+          for name in names:
+              p = pathlib.Path(name)
+              b = p.read_bytes()
+              magic, version, length = struct.unpack_from('<4sII', b)
+              if magic != b'glTF' or version != 2 or length != len(b):
+                  raise ValueError('Invalid GLB: '+name)
+              offset, document, binary = 12, None, b''
+              while offset < len(b):
+                  n, kind = struct.unpack_from('<II',b,offset)
+                  body = b[offset+8:offset+8+n]
+                  if kind == 0x4E4F534A: document = json.loads(body)
+                  elif kind == 0x004E4942: binary = body
+                  offset += n+8
+              if document is None: raise ValueError('No JSON: '+name)
+              d = out/p.stem
+              d.mkdir(exist_ok=True)
+              (d/'gltf.json').write_text(json.dumps(document,indent=2),encoding='utf-8')
+              for i, image in enumerate(document.get('images',[])):
+                  if 'bufferView' not in image: continue
+                  view = document['bufferViews'][image['bufferView']]
+                  start = view.get('byteOffset',0)
+                  ext = {'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp'}.get(image.get('mimeType'),'.bin')
+                  (d/('image_%03d'%i+ext)).write_bytes(binary[start:start+view['byteLength']])
+              shutil.copyfile(p,out/'source'/name)
+              meshes=[]
+              for i, mesh in enumerate(document.get('meshes',[])):
+                  primitives=[]
+                  for primitive in mesh['primitives']:
+                      accessor=document.get('accessors',[])[primitive['attributes']['POSITION']]
+                      primitives.append({'position':primitive['attributes']['POSITION'],'vertices':accessor['count'],'min':accessor.get('min'),'max':accessor.get('max'),'material':primitive.get('material'),'indices':primitive.get('indices'),'extensions':primitive.get('extensions')})
+                  meshes.append({'index':i,'name':mesh.get('name'),'primitives':primitives})
+              item={'file':name,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'nodes':document.get('nodes',[]),'meshes':meshes,'materials':document.get('materials',[]),'animations':[a.get('name','unnamed') for a in document.get('animations',[])],'extensionsRequired':document.get('extensionsRequired',[]),'asset':document.get('asset',{})}
+              report['models'].append(item)
+              print(name, len(b), 'bytes;',len(meshes),'meshes;',len(item['nodes']),'nodes')
+          (out/'audit.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-design-heli-source-inspection
+          path: heli-inspection/
+          retention-days: 7
+          if-no-files-found: error
